@@ -27,6 +27,8 @@ class MarketCollector:
     ) -> pd.DataFrame:
         logger.info("Fetching %s", ticker)
         df = yf.download(ticker, period=period, interval=interval, progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
         df.columns = [c.lower().replace(" ", "_") for c in df.columns]
         return df
 

@@ -38,3 +38,6 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Private local notes
+PRIVATE_PROGRESS.md
