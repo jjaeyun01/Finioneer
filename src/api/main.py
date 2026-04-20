@@ -1,120 +1,126 @@
-"""Market Intelligence REST API.
-
-Run locally:
-    uvicorn src.api.main:app --reload --port 8000
-
-Swagger UI: http://localhost:8000/docs
-"""
-
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+import pandas as pd
+from pathlib import Path
+from configs.settings import settings
 
-app = FastAPI(
-    title="Market Intelligence API",
-    description="Economic forecasting, market indicators, and financial news NLP",
-    version="0.1.0",
+app = FastAPI(title="Finioneer API", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
+MARKET_DIR = settings.data_dir / "raw" / "market"
+FRED_DIR   = settings.data_dir / "raw" / "fred"
 
-# ── Response schemas ──────────────────────────────────────────────────────────
+TICKER_MAP = {
+    "SPY": "GSPC", "QQQ": "NDX", "DJI": "DJI",
+    "KOSPI": "KS11", "KOSDAQ": "KQ11",
+    "BTC": "BTC_USD",
+    "AAPL": "AAPL", "NVDA": "NVDA", "MSFT": "MSFT",
+    "TSLA": "TSLA", "META": "META", "AMZN": "AMZN", "GOOGL": "GOOGL",
+    "SAMSUNG": "005930_KS", "SKHYNIX": "000660_KS",
+}
 
-class CPIForecast(BaseModel):
-    model: str
-    forecast_yoy: float
-    unit: str = "% YoY"
-    steps_ahead: int = 1
-
-
-class FOMCForecast(BaseModel):
-    direction: str          # HIKE | HOLD | CUT
-    hike_prob: float
-    hold_prob: float
-    cut_prob: float
+PERIODS = {"1w": 7, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "5y": 1825}
 
 
-class NewsSentiment(BaseModel):
-    title: str
-    source: str
-    sentiment: str
-    hawk_score: float
-    dove_score: float
-    relevance: float
+def load_parquet(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Data not found: {path.name}")
+    return pd.read_parquet(path)
 
-
-# ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
     return {"status": "ok", "version": app.version}
 
 
-# ── Forecast endpoints ────────────────────────────────────────────────────────
-
-@app.get("/predict/cpi", response_model=CPIForecast, tags=["Forecast"])
-def predict_cpi(model: str = "arima", steps: int = 1):
-    """
-    Forecast next month's CPI YoY using the selected model.
-    - **model**: arima | xgboost | ensemble
-    - **steps**: months ahead (1–3)
-    """
-    if steps not in range(1, 4):
-        raise HTTPException(status_code=422, detail="steps must be 1, 2, or 3")
-    if model not in ("arima", "xgboost", "ensemble"):
-        raise HTTPException(status_code=422, detail="model must be arima | xgboost | ensemble")
-
-    # TODO Phase 2: load fitted model from disk and return real forecast
-    # Placeholder until models are trained
-    return CPIForecast(model=model, forecast_yoy=3.2, steps_ahead=steps)
-
-
-@app.get("/predict/fomc", response_model=FOMCForecast, tags=["Forecast"])
-def predict_fomc():
-    """Predict next FOMC meeting rate decision direction."""
-    # TODO Phase 2: wire up FOMCClassifier.predict_proba()
-    return FOMCForecast(direction="HOLD", hike_prob=0.05, hold_prob=0.82, cut_prob=0.13)
-
-
-# ── Indicators ────────────────────────────────────────────────────────────────
-
-@app.get("/indicators/macro", tags=["Indicators"])
-def macro_indicators():
-    """Return latest values for key US macro indicators."""
-    # TODO Phase 1: pull from DB (collected by FRED pipeline)
+@app.get("/api/chart/{ticker}")
+def get_chart(ticker: str, period: str = "1mo"):
+    key = TICKER_MAP.get(ticker.upper())
+    if not key:
+        raise HTTPException(status_code=404, detail=f"Unknown ticker: {ticker}")
+    df = load_parquet(MARKET_DIR / f"{key}.parquet")
+    df.index = pd.to_datetime(df.index)
+    df = df.tail(PERIODS.get(period, 30))
     return {
-        "cpi_yoy": None,
-        "ppi_yoy": None,
-        "fed_funds_rate": None,
-        "unemployment": None,
-        "t10y_yield": None,
-        "note": "Connect FRED collector in Phase 1 to populate these.",
+        "ticker": ticker.upper(),
+        "period": period,
+        "dates":  df.index.strftime("%Y-%m-%d").tolist(),
+        "open":   df["open"].round(2).tolist(),
+        "high":   df["high"].round(2).tolist(),
+        "low":    df["low"].round(2).tolist(),
+        "close":  df["close"].round(2).tolist(),
+        "volume": df["volume"].fillna(0).astype(int).tolist(),
+        "latest": float(df["close"].iloc[-1].round(2)),
+        "change": float((df["close"].iloc[-1] - df["close"].iloc[-2]).round(2)),
+        "change_pct": float(((df["close"].iloc[-1] / df["close"].iloc[-2] - 1) * 100).round(3)),
     }
 
 
-@app.get("/indicators/markets", tags=["Indicators"])
-def market_indicators():
-    """Return latest index levels and key market metrics."""
-    # TODO Phase 1: pull from market collector DB
+@app.get("/api/markets")
+def get_markets():
+    result = {}
+    for label, key in TICKER_MAP.items():
+        path = MARKET_DIR / f"{key}.parquet"
+        try:
+            df = load_parquet(path)
+            latest = float(df["close"].iloc[-1].round(2))
+            prev   = float(df["close"].iloc[-2].round(2))
+            result[label] = {
+                "price":      latest,
+                "change":     round(latest - prev, 2),
+                "change_pct": round((latest / prev - 1) * 100, 3),
+                "date":       str(df.index[-1].date()),
+            }
+        except Exception as e:
+            result[label] = {"error": str(e)}
+    return result
+
+
+@app.get("/api/macro")
+def get_macro():
+    df = load_parquet(FRED_DIR / "macro.parquet").dropna(how="all")
+    
+    def latest_yoy(col):
+        s = df[col].dropna()
+        if len(s) < 13:
+            return None
+        yoy = (s.iloc[-1] / s.iloc[-13] - 1) * 100
+        return round(float(yoy), 3)
+    
+    def latest(col):
+        s = df[col].dropna()
+        return round(float(s.iloc[-1]), 4) if len(s) else None
+
     return {
-        "sp500": None,
-        "nasdaq100": None,
-        "kospi": None,
-        "btc_usd": None,
-        "vix": None,
-        "krw_usd": None,
+        "cpi_yoy":      latest_yoy("cpi"),
+        "ppi_yoy":      latest_yoy("ppi"),
+        "fed_funds":    latest("fed"),
+        "unemployment": latest("unemp"),
+        "t10y":         latest("t10y"),
+        "vix":          latest("vix"),
+        "m2":           latest("m2"),
+        "dxy":          latest("dxy"),
     }
 
-
-# ── News ──────────────────────────────────────────────────────────────────────
-
-@app.get("/news/latest", response_model=list[NewsSentiment], tags=["News"])
-def latest_news(limit: int = 10):
-    """Return the most recent market-relevant news with sentiment scores."""
-    # TODO Phase 2: wire up NewsCollector + FinBERTAnalyzer
-    return []
-
-
-@app.get("/news/fomc", tags=["News"])
-def fomc_news():
-    """Latest FOMC-related news and statement delta score."""
-    # TODO Phase 3: wire up FOMCParser
-    return {"delta_score": None, "tone": None, "articles": []}
+@app.get("/api/predict/cpi")
+def predict_cpi():
+    from src.models.arima import load_cpi, ARIMAForecaster
+    cpi = load_cpi()
+    model = ARIMAForecaster()
+    model.fit(cpi)
+    fc = model.forecast(steps=3)
+    return {
+        "model": "ARIMA(2,1,2)",
+        "mae": 0.2188,
+        "current_cpi": round(float(cpi.iloc[-1]), 3),
+        "forecast": [
+            {"date": str(d.date()), "cpi_yoy": round(float(v), 3)}
+            for d, v in zip(fc.index, fc.values)
+        ],
+    }
