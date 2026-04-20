@@ -1,0 +1,40 @@
+# Environment
+.env
+configs/.env
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+
+# Data (raw files are large — use DVC or keep local only)
+data/raw/
+data/cache/
+*.parquet
+*.csv
+*.db
+
+# Models (save to releases or model registry instead)
+*.pt
+*.pth
+*.pkl
+*.joblib
+
+# Notebooks
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+*.egg-info/
